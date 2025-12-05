@@ -1,0 +1,51 @@
+{
+    "name": "my-story-protocol-example-beta",
+    "version": "1.0.0",
+    "description": "",
+    "main": "index.js",
+    "scripts": {
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "register": "npx ts-node ./scripts/registration/register.ts",
+        "register-custom": "npx ts-node ./scripts/registration/registerCustom.ts",
+        "derivative-commercial": "npx ts-node ./scripts/derivative/registerDerivativeCommercial.ts",
+        "derivative-non-commercial": "npx ts-node ./scripts/derivative/registerDerivativeNonCommercial.ts",
+        "derivative-commercial-custom": "npx ts-node ./scripts/derivative/registerDerivativeCommercialCustom.ts",
+        "dispute": "npx ts-node ./scripts/dispute/disputeIp.ts",
+        "mint-license": "npx ts-node ./scripts/licenses/mintLicense.ts",
+        "license-limit": "npx ts-node ./scripts/licenses/oneTimeUseLicense.ts",
+        "pay-revenue": "npx ts-node ./scripts/royalty/payRevenue.ts",
+        "license-revenue": "npx ts-node ./scripts/royalty/licenseRevenue.ts",
+        "transfer-royalty-tokens": "npx ts-node ./scripts/royalty/transferRoyaltyTokens.ts",
+        "claim-revenue": "npx ts-node ./scripts/royalty/claimRevenue.ts",
+        "create-spg-collection": "npx ts-node ./utils/functions/createSpgNftCollection.ts",
+        "send-raw-transaction": "npx ts-node ./scripts/misc/sendRawTransaction.ts",
+        "server": "npx ts-node ./server.ts"
+    },
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@story-protocol/core-sdk": "^1.4.2",
+        "axios": "^1.12.2",
+        "bcrypt": "^6.0.0",
+        "better-sqlite3": "^12.4.6",
+        "cors": "^2.8.5",
+        "dotenv": "^16.4.7",
+        "ethers": "^6.15.0",
+        "express": "^5.1.0",
+        "jsonwebtoken": "^9.0.2",
+        "multer": "^2.0.2",
+        "multiformats": "^9.9.0",
+        "viem": "^2.8.12"
+    },
+    "devDependencies": {
+        "@types/bcrypt": "^6.0.0",
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.5",
+        "@types/jsonwebtoken": "^9.0.10",
+        "@types/multer": "^2.0.0",
+        "@types/node": "^20.11.17",
+        "prettier": "3.2.5",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.8.3"
+    }
+}
