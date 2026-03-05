@@ -23,6 +23,7 @@ app.use(
 
 app.use(express.json());
 
+
 // JWT secret (set in .env)
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 
@@ -58,7 +59,39 @@ CREATE TABLE IF NOT EXISTS users (
   email TEXT UNIQUE NOT NULL,
   wallet_address TEXT UNIQUE NOT NULL,
   password TEXT NOT NULL,
+  role TEXT DEFAULT 'user', -- 'user' or 'admin'
+  is_active BOOLEAN DEFAULT 1,
+  last_login TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+`).run();
+
+// Activity logs table
+db.prepare(`
+CREATE TABLE IF NOT EXISTS activity_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER,
+  action TEXT NOT NULL,
+  metadata TEXT,
+  ip_address TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(user_id) REFERENCES users(id)
+);
+`).run();
+
+// Support tickets table
+db.prepare(`
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL,
+  subject TEXT NOT NULL,
+  message TEXT NOT NULL,
+  status TEXT DEFAULT 'open', -- open | in_progress | closed
+  priority TEXT DEFAULT 'normal', -- low | normal | high
+  admin_reply TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP,
+  FOREIGN KEY(user_id) REFERENCES users(id)
 );
 `).run();
 
@@ -115,6 +148,16 @@ db.prepare(`CREATE TABLE IF NOT EXISTS owned_licenses (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 `).run();
+
+db.prepare(`
+  UPDATE users
+  SET role = 'admin'
+  WHERE email = ? AND wallet_address = ?
+`).run("admin@gmail.com", "0xe744BF1b2F108E3bA3CAF893c4f7e41352C46008");
+
+console.log("Admin role updated if user exists with matching email and wallet");
+
+// ---------------------- Helper Functions ----------------------
 // Fix BigInt serialization
 // Recursively converts all BigInt values to strings
 function serialize(obj: any): any {
@@ -142,6 +185,23 @@ function serialize(obj: any): any {
   return obj;
 }
 
+// Log user activity
+function logActivity(userId: number | null, action: string, metadata: any, req?: any) {
+  try {
+    db.prepare(`
+      INSERT INTO activity_logs (user_id, action, metadata, ip_address)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      userId,
+      action,
+      JSON.stringify(metadata || {}),
+      req?.ip || null
+    );
+  } catch (err) {
+    console.error("Activity log error:", err);
+  }
+}
+
 
 // Multer setup
 const upload = multer({ storage: multer.memoryStorage() });
@@ -150,8 +210,17 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // Generate JWT
 function generateToken(user: any) {
-  return jwt.sign({ id: user.id, wallet: user.wallet_address }, JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign(
+    { 
+      id: user.id, 
+      wallet: user.wallet_address,
+      role: user.role
+    }, 
+    JWT_SECRET, 
+    { expiresIn: "7d" }
+  );
 }
+
 
 // Verify JWT
 function authMiddleware(req: any, res: any, next: any) {
@@ -167,6 +236,13 @@ function authMiddleware(req: any, res: any, next: any) {
   } catch (err) {
     res.status(401).json({ error: "Invalid token" });
   }
+}
+
+function adminMiddleware(req: any, res: any, next: any) {
+  if (req.user.role !== "admin") {
+    return res.status(403).json({ error: "Admin access required" });
+  }
+  next();
 }
 
 // ---------------------- Auth Routes ----------------------
@@ -189,6 +265,7 @@ app.post("/signup", async (req, res) => {
 
     const user = db.prepare("SELECT * FROM users WHERE id = ?").get(result.lastInsertRowid);
     const token = generateToken(user);
+    logActivity(user.id, "signup", { email: user.email }, req);
     res.json({ success: true, user, token });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -208,6 +285,10 @@ app.post("/login", async (req, res) => {
   if (!match) return res.status(401).json({ error: "Incorrect password" });
 
   const token = generateToken(user);
+  db.prepare(`UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?`).run(user.id);
+
+logActivity(user.id, "login", {}, req);
+
   res.json({ success: true, user, token });
 });
 
@@ -276,6 +357,10 @@ const licenseTermsSafe = serialize(output.licenseTerms);
         100000, // default creator shares
         JSON.stringify(investors)
       );
+logActivity(req.user.id, "asset_registered", {
+  ipId: output.ipId,
+  txHash: output.txHash
+}, req);
 
       res.json(serialize({ success: true, data: output }));
     } catch (err: any) {
@@ -366,6 +451,10 @@ app.post("/claim", authMiddleware, async (req, res) => {
 
     // 3️⃣ Clear revenueEarned after WIP payout
     db.prepare(`UPDATE assets SET revenueEarned = '{}' WHERE ip_id = ?`).run(ipId);
+logActivity(req.user.id, "revenue_claimed", {
+  ipId,
+  paymentsProcessed: payments.length
+}, req);
 
     res.json({
       success: true,
@@ -579,6 +668,11 @@ const safeTerm = serialize(validTerm);
   JSON.stringify(safeTerm)
 );
 
+logActivity(req.user.id, "license_purchased", {
+  ipId: listing.ip_id,
+  listingId
+}, req);
+
     return res.json(
       serialize({
         success: true,
@@ -701,8 +795,10 @@ app.get("/me", authMiddleware, (req: any, res) => {
     name: req.user.name,
     email: req.user.email,
     wallet: req.user.wallet_address,
+    role: req.user.role,
   });
 });
+
 
 // ---------------------- Config Endpoint ----------------------
 
@@ -722,7 +818,7 @@ app.get("/config", (req, res) => {
 
 
 // ---------------------- Get Server Wallet Address ----------------------
-app.get("/wallet/server",authMiddleware, (req, res) => {
+app.get("/wallet/server", (req, res) => {
   try {
     res.json({
       success: true,
@@ -733,15 +829,196 @@ app.get("/wallet/server",authMiddleware, (req, res) => {
   }
 });
 
-app.get("/health", (req, res) => {
-  res.status(200).json({ status: "ok" });
+// ---------------------- Support Ticket Routes ----------------------
+
+// Create a support ticket
+app.post("/support/create", authMiddleware, (req: any, res) => {
+  const { subject, message, priority } = req.body;
+
+  if (!subject || !message)
+    return res.status(400).json({ error: "Missing fields" });
+
+  db.prepare(`
+    INSERT INTO support_tickets (user_id, subject, message, priority)
+    VALUES (?, ?, ?, ?)
+  `).run(req.user.id, subject, message, priority || "normal");
+
+  logActivity(req.user.id, "support_ticket_created", { subject }, req);
+
+  res.json({ success: true });
+});
+// Get user's support tickets
+app.get("/support/my", authMiddleware, (req: any, res) => {
+  const tickets = db.prepare(`
+    SELECT * FROM support_tickets
+    WHERE user_id = ?
+    ORDER BY created_at DESC
+  `).all(req.user.id);
+
+  res.json({ tickets });
+});
+
+// Admin: Get all support tickets
+app.get("/admin/tickets", authMiddleware, adminMiddleware, (req, res) => {
+  const page = parseInt(req.query.page as string) || 1;
+  const limit = parseInt(req.query.limit as string) || 5;
+  const offset = (page - 1) * limit;
+
+  const total = db
+    .prepare(`SELECT COUNT(*) as count FROM support_tickets`)
+    .get().count;
+
+  const tickets = db.prepare(`
+    SELECT t.*, u.email
+    FROM support_tickets t
+    LEFT JOIN users u ON t.user_id = u.id
+    ORDER BY t.created_at DESC
+    LIMIT ? OFFSET ?
+  `).all(limit, offset);
+
+  res.json({
+    tickets,
+    pagination: {
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    },
+  });
+});
+// Admin: Update ticket status
+app.post("/admin/ticket/status", authMiddleware, adminMiddleware, (req, res) => {
+  const { ticketId, status } = req.body;
+
+  if (!["open", "in_progress", "closed"].includes(status)) {
+    return res.status(400).json({ error: "Invalid status" });
+  }
+
+  db.prepare(`
+    UPDATE support_tickets
+    SET status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(status, ticketId);
+
+  res.json({ success: true });
+});
+
+// Admin: Close a support ticket
+app.post("/admin/ticket/close", authMiddleware, adminMiddleware, (req, res) => {
+  const { ticketId } = req.body;
+
+  db.prepare(`
+    UPDATE support_tickets
+    SET status = 'closed', updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(ticketId);
+
+  res.json({ success: true });
+});
+
+
+// Admin: Get all users
+app.get("/admin/users", authMiddleware, adminMiddleware, (req, res) => {
+  const users = db.prepare(`
+    SELECT id, name, email, wallet_address, role, is_active, last_login, created_at
+    FROM users
+    ORDER BY created_at DESC
+  `).all();
+
+  res.json({ users });
+});
+// Admin: Reply to a support ticket
+app.post("/admin/ticket/reply", authMiddleware, adminMiddleware, (req, res) => {
+  const { ticketId, reply, status } = req.body;
+
+  db.prepare(`
+    UPDATE support_tickets
+    SET admin_reply = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(reply, status || "in_progress", ticketId);
+
+  res.json({ success: true });
+});
+
+// Admin: View activity logs
+app.get("/admin/activity", authMiddleware, adminMiddleware, (req, res) => {
+  const logs = db.prepare(`
+    SELECT a.*, u.email
+    FROM activity_logs a
+    LEFT JOIN users u ON a.user_id = u.id
+    ORDER BY a.created_at DESC
+    LIMIT 200
+  `).all();
+
+  res.json({ logs });
+});
+
+// ---------------------- Admin Dashboard Stats ----------------------
+
+app.get("/admin/dashboard", authMiddleware, adminMiddleware, (req, res) => {
+  try {
+    // Total users
+    const totalUsers = db
+      .prepare(`SELECT COUNT(*) as count FROM users`)
+      .get().count;
+
+    // Active users today
+    const activeUsersToday = db
+      .prepare(`
+        SELECT COUNT(*) as count
+        FROM users
+        WHERE DATE(last_login) = DATE('now')
+      `)
+      .get().count;
+
+    // Total assets
+    const totalAssets = db
+      .prepare(`SELECT COUNT(*) as count FROM assets`)
+      .get().count;
+
+    // Total sales (completed payments)
+    const totalSales = db
+      .prepare(`
+        SELECT COALESCE(SUM(amount), 0) as total
+        FROM payments
+      `)
+      .get().total;
+
+    // Open support tickets
+    const openTickets = db
+      .prepare(`
+        SELECT COUNT(*) as count
+        FROM support_tickets
+        WHERE status = 'open'
+      `)
+      .get().count;
+
+    // Recent activity (last 10)
+    const recentActivity = db.prepare(`
+      SELECT a.action, a.metadata, a.created_at, u.email
+      FROM activity_logs a
+      LEFT JOIN users u ON a.user_id = u.id
+      ORDER BY a.created_at DESC
+      LIMIT 10
+    `).all();
+
+    res.json({
+      success: true,
+      stats: {
+        totalUsers,
+        activeUsersToday,
+        totalAssets,
+        totalSales,
+        openTickets,
+      },
+      recentActivity,
+    });
+  } catch (err: any) {
+    console.error("Admin dashboard error:", err);
+    res.status(500).json({ error: "Failed to load dashboard data" });
+  }
 });
 
 // ---------------------- Start Server ----------------------
 
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-  console.log(`Dravik backend running on port ${PORT}`);
-});
-
+app.listen(5000, () => console.log("API running on http://localhost:5000"));
